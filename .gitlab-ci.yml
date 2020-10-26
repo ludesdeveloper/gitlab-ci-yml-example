@@ -1,0 +1,94 @@
+image: docker:stable
+
+stages:
+    - build
+    - test
+    - release
+    - deploy-staging
+    - acceptance
+    - deploy
+
+variables:
+    CONTAINER_TEST_IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+    CONTAINER_TAG_IMAGE: "$DOCKERHUB_CONTAINER_TAG:$CI_COMMIT_REF_SLUG"
+
+build:
+    image: docker:stable
+    stage: build
+    services:
+        - docker:dind
+    before_script:
+        - echo $CI_BUILD_TOKEN | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+    script:
+        - echo $CONTAINER_TEST_IMAGE
+        - docker build --pull -t $CONTAINER_TEST_IMAGE .
+        - docker push $CONTAINER_TEST_IMAGE
+    only:
+        - tags
+
+test:
+    stage: test
+    services:
+        # - docker:dind
+        - name: docker:dind
+          alias: localhost
+    before_script:
+        # - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+        - echo $CI_BUILD_TOKEN | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+        - apk update && apk add curl curl-dev bash
+    script:
+        - docker pull $CONTAINER_TEST_IMAGE
+        - docker run -d -p 5000:5000 --name bps_01 $CONTAINER_TEST_IMAGE
+        - docker ps -a
+        - sleep 15
+        - export OUTPUT=$(docker exec bps_01 curl -sSfL localhost:5000 | grep "Hello, Badan Pusat Statistik")
+        - echo $OUTPUT
+        - if [[ "$(echo "$OUTPUT")" == '' ]] && echo true; then exit 1; fi
+    only:
+        - tags
+
+release:
+    stage: release
+    services:
+        - docker:dind
+    before_script:
+        - docker login -u "$DOCKERHUB_CI_REGISTRY_USER" -p "$DOCKERHUB_CI_REGISTRY_PASSWORD" $DOCKERHUB_CI_REGISTRY
+    script:
+        - docker build --pull -t $CONTAINER_TEST_IMAGE .
+        - docker tag $CONTAINER_TEST_IMAGE $CONTAINER_TAG_IMAGE
+        - docker push $CONTAINER_TAG_IMAGE
+        - docker tag $CONTAINER_TEST_IMAGE $DOCKERHUB_CONTAINER_LATEST
+        - docker push $DOCKERHUB_CONTAINER_LATEST
+    only:
+        - tags
+
+deploy-staging:
+    stage: deploy-staging
+    image: python:latest
+    services:
+        - docker:dind
+    script:
+        - pip install awscli
+        - aws ecs update-service --region "${ECS_REGION}" --cluster "${ECS_CLUSTER_NAME_STG}" --service "${ECS_SERVICE_NAME_STG}" --force-new-deployment
+    only:
+        - tags
+
+acceptance:
+    stage: acceptance
+    script:
+      - echo Please Accept!
+    when: manual
+    only:
+      - tags
+
+deploy:
+    stage: deploy
+    image: python:latest
+    services:
+        - docker:dind
+    script:
+        - pip install awscli
+        - aws ecs update-service --region "${ECS_REGION}" --cluster "${ECS_CLUSTER_NAME}" --service "${ECS_SERVICE_NAME}" --force-new-deployment
+    needs: [acceptance]
+    only:
+        - tags
